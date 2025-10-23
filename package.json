@@ -1,11 +1,12 @@
 {
   "name": "rodonaves-api",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Scraper Rodonaves com Puppeteer para Render",
   "type": "module",
   "main": "rodonaves-api.js",
   "scripts": {
-    "postinstall": "npx puppeteer browsers install chrome",
+    "render-build": "PUPPETEER_CACHE_DIR=/opt/render/.cache/puppeteer npx puppeteer browsers install chrome",
+    "postinstall": "PUPPETEER_CACHE_DIR=${PUPPETEER_CACHE_DIR:-/opt/render/.cache/puppeteer} npx puppeteer browsers install chrome",
     "start": "node rodonaves-api.js"
   },
   "dependencies": {

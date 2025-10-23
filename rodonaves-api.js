@@ -1,6 +1,7 @@
 // rodonaves-api.js
-// Scraper Rodonaves usando Puppeteer + Express
-// GET /rodonaves?cnpj=16524954000133&nf=10021127
+// API de rastreio Rodonaves (Puppeteer + Express)
+// Endpoint: /rodonaves?cnpj=16524954000133&nf=10150551
+
 import express from "express";
 import puppeteer from "puppeteer";
 import cors from "cors";
@@ -11,97 +12,74 @@ app.use(cors());
 app.get("/rodonaves", async (req, res) => {
   const cnpj = (req.query.cnpj || "16524954000133").trim();
   const nf = (req.query.nf || "").trim();
-  if (!nf) return res.status(400).json({ ok:false, error: "Falta parâmetro nf" });
+  if (!nf) return res.status(400).json({ ok: false, error: "Falta parâmetro nf" });
 
   const url = "https://rodonaves.com.br/rastreio-de-mercadoria";
-
   let browser = null;
+
   try {
+    // ✅ Caminho correto do Chrome no ambiente do Render
+    const executablePath = await puppeteer.executablePath();
+
     browser = await puppeteer.launch({
-      headless: "new", // compatível com versões modernas do Chromium
+      headless: "new",
+      executablePath,
       args: ["--no-sandbox", "--disable-setuid-sandbox"]
     });
 
     const page = await browser.newPage();
-    page.setDefaultNavigationTimeout(45000);
-    page.setDefaultTimeout(45000);
+    page.setDefaultNavigationTimeout(60000);
+    page.setDefaultTimeout(60000);
 
     await page.goto(url, { waitUntil: "domcontentloaded" });
 
-    // seleciona "Consultar por: Nota fiscal"
-    await page.waitForSelector("select.form-select", { timeout: 15000 });
-    try { await page.select("select.form-select", "invoiceNumber"); } catch(e){ /* ignore */ }
+    // Seleciona "Consultar por: Nota fiscal"
+    await page.waitForSelector("select.form-select", { visible: true });
+    await page.select("select.form-select", "invoiceNumber");
 
-    // preenche CPF/CNPJ e NF
-    // campo CPF/CNPJ tem aria-describedby="CPF"
-    const cnpjSelector = 'input[aria-describedby="CPF"]';
-    const nfSelector = 'input[aria-describedby="NF"]';
+    // Preenche CNPJ e NF
+    await page.type('input[aria-describedby="CPF"]', cnpj, { delay: 20 });
+    await page.type('input[aria-describedby="NF"]', nf, { delay: 20 });
 
-    await page.waitForTimeout(300); // pequeno delay
-    if (await page.$(cnpjSelector) !== null) {
-      // insere sem formatação — o site aplica máscaras
-      await page.click(cnpjSelector, { clickCount: 3 }).catch(()=>{});
-      await page.type(cnpjSelector, cnpj, { delay: 20 });
-    }
+    // Clica no botão RASTREAR
+    await page.click("button.btn-submit.btn-primary");
 
-    if (await page.$(nfSelector) !== null) {
-      await page.click(nfSelector, { clickCount: 3 }).catch(()=>{});
-      await page.type(nfSelector, nf, { delay: 20 });
-    }
-
-    // clica em rastrear (botão)
-    const btn = await page.$("button.btn-submit.btn-primary, button.btn-primary");
-    if (btn) {
-      await btn.click();
-    } else {
-      // fallback: clique em qualquer botão primário
-      await page.evaluate(()=> {
-        const b = document.querySelector("button[type=submit]");
-        if (b) b.click();
-      });
-    }
-
-    // espera por resultado (lista de eventos) ou mensagem "Nenhum pedido encontrado"
+    // Espera os resultados
     await page.waitForFunction(() => {
-      const hasList = document.querySelectorAll('.product-status-date li').length > 0;
-      const noResElem = document.querySelector('.product-status-top');
-      const noRes = noResElem && /nenhum pedido encontrado/i.test(noResElem.textContent || '');
-      return hasList || noRes;
-    }, { timeout: 30000 }).catch(()=>{});
+      const list = document.querySelectorAll(".product-status-date li");
+      const noRes = document.querySelector(".product-status-top")?.textContent?.toLowerCase().includes("nenhum pedido");
+      return list.length > 0 || noRes;
+    }, { timeout: 45000 }).catch(() => {});
 
-    // coleta eventos (se existirem)
+    // Coleta eventos
     const events = await page.$$eval(".product-status-date li", items =>
       items.map(el => ({
-        time: (el.querySelector(".date") && el.querySelector(".date").textContent.trim()) || "",
-        reason: (el.querySelector(".desc") && el.querySelector(".desc").textContent.trim()) || el.textContent.trim()
+        time: el.querySelector(".date")?.textContent?.trim() || "",
+        reason: el.querySelector(".desc")?.textContent?.trim() || el.textContent.trim()
       }))
     );
 
-    // coleta metadados visíveis
+    // Coleta metadados adicionais
     const meta = await page.evaluate(() => {
       const get = sel => document.querySelector(sel)?.textContent?.trim() || "";
       return {
         serviceType: get('.product-status-info .info-item:nth-child(1) .desc'),
-        cteNumber:   get('.product-status-info .info-item:nth-child(2) .desc'),
-        date:        get('.product-status-info .info-item:nth-child(3) .desc'),
-        sender:      get('.product-status-info .info-item:nth-child(4) .desc'),
-        recipient:   get('.product-status-info .info-item:nth-child(5) .desc'),
-        status:      get('.product-status-info .info-item:nth-child(6) .desc'),
+        cteNumber: get('.product-status-info .info-item:nth-child(2) .desc'),
+        date: get('.product-status-info .info-item:nth-child(3) .desc'),
+        sender: get('.product-status-info .info-item:nth-child(4) .desc'),
+        recipient: get('.product-status-info .info-item:nth-child(5) .desc'),
+        status: get('.product-status-info .info-item:nth-child(6) .desc'),
         preDelivery: get('.product-status-top .date')
       };
     });
 
     await browser.close();
-    browser = null;
-
     res.json({ ok: events.length > 0, events, meta, url });
   } catch (err) {
-    if (browser) try { await browser.close(); } catch(e){/*ignore*/}
-
-    // retorna erro com mensagem para debug
-    res.json({ ok:false, error: String(err), url });
+    if (browser) try { await browser.close(); } catch {}
+    res.json({ ok: false, error: String(err), url });
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Rodonaves API listening on port " + PORT));
+app.listen(PORT, () => console.log("✅ Rodonaves API online na porta " + PORT));

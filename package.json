@@ -1,0 +1,15 @@
+{
+  "name": "rodonaves-api",
+  "version": "1.0.0",
+  "description": "Rodonaves scraper API (Puppeteer)",
+  "type": "module",
+  "main": "rodonaves-api.js",
+  "scripts": {
+    "start": "node rodonaves-api.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "puppeteer": "^22.4.1"
+  }
+}

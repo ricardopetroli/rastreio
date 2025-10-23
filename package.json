@@ -1,6 +1,6 @@
 {
   "name": "rodonaves-api",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Scraper Rodonaves com Puppeteer para Render",
   "type": "module",
   "main": "rodonaves-api.js",

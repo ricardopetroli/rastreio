@@ -8,43 +8,67 @@ import path from "path";
 const app = express();
 app.use(cors());
 
-function findChromeIn(dir) {
+/** Lista de diretórios onde vamos procurar o Chrome baixado pelo Puppeteer */
+const CANDIDATE_DIRS = [
+  process.env.PUPPETEER_CACHE_DIR || "/opt/render/.cache/puppeteer",
+  "/opt/render/.cache/puppeteer",              // nosso alvo no Build
+  "/opt/render/project/.cache/puppeteer",      // cache do projeto
+  `${process.cwd()}/node_modules/puppeteer/.local-chromium`, // fallback local
+  "/root/.cache/puppeteer",
+  "/home/render/.cache/puppeteer",
+];
+
+/** procura por .../chrome/linux-xxx/chrome-linux64/chrome */
+function findChromeUnder(root) {
   try {
-    if (!fs.existsSync(dir)) return null;
-    // procura por .../chrome/linux-xxx/chrome-linux64/chrome
-    for (const sub1 of fs.readdirSync(dir)) {
-      const p1 = path.join(dir, sub1);
-      if (!fs.statSync(p1).isDirectory()) continue;
-      const maybe = path.join(p1, "chrome-linux64", "chrome");
-      if (fs.existsSync(maybe)) return maybe;
-      // estrutura alternativa …/chrome/linux-xxx/chrome
-      const alt = path.join(p1, "chrome");
-      if (fs.existsSync(alt)) return alt;
+    if (!fs.existsSync(root)) return null;
+    // procurar em .../chrome/*/
+    const chromeRoot = path.join(root, "chrome");
+    const level1 = fs.existsSync(chromeRoot) ? fs.readdirSync(chromeRoot) : [];
+    for (const d of level1) {
+      const base = path.join(chromeRoot, d);
+      const candidate1 = path.join(base, "chrome-linux64", "chrome");
+      const candidate2 = path.join(base, "chrome"); // estrutura alternativa
+      if (fs.existsSync(candidate1)) return candidate1;
+      if (fs.existsSync(candidate2)) return candidate2;
+    }
+    // fallback: varrer recursivamente alguns níveis
+    const stack = [root];
+    while (stack.length) {
+      const cur = stack.pop();
+      let entries;
+      try { entries = fs.readdirSync(cur, { withFileTypes: true }); } catch { continue; }
+      for (const e of entries) {
+        const full = path.join(cur, e.name);
+        if (e.isFile() && e.name === "chrome" && fs.accessSync(full, fs.constants.X_OK) == null) {
+          return full;
+        }
+        if (e.isDirectory()) stack.push(full);
+      }
     }
   } catch {}
   return null;
 }
 
 async function resolveChromePath() {
-  // 1) Tenta o caminho que o Puppeteer conhece
+  // 1) Caminho “oficial” que o Puppeteer conhece
   try {
     const p = await puppeteer.executablePath();
     if (p && fs.existsSync(p)) return p;
   } catch {}
-  // 2) Tenta variável de ambiente explícita
+  // 2) Var de ambiente explícita
   if (process.env.PUPPETEER_EXECUTABLE_PATH && fs.existsSync(process.env.PUPPETEER_EXECUTABLE_PATH)) {
     return process.env.PUPPETEER_EXECUTABLE_PATH;
   }
-  // 3) Var de cache padrão no Render
-  const cacheDir = process.env.PUPPETEER_CACHE_DIR || "/opt/render/.cache/puppeteer";
-  const inCache = findChromeIn(path.join(cacheDir, "chrome"));
-  if (inCache) return inCache;
-
-  // 4) Fallback: tenta dentro do node_modules
-  const local = findChromeIn(path.join(process.cwd(), "node_modules", "puppeteer", ".local-chromium"));
-  if (local) return local;
-
-  throw new Error("Chrome não encontrado. Verifique se o build instalou o navegador.");
+  // 3) Varre diretórios candidatos
+  for (const dir of CANDIDATE_DIRS) {
+    const found = findChromeUnder(dir);
+    if (found) return found;
+  }
+  throw new Error(
+    "Chrome não encontrado. " +
+    "Garanta que o build executa: npx puppeteer browsers install chrome --cache-dir=/opt/render/.cache/puppeteer"
+  );
 }
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
@@ -52,11 +76,13 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 app.get("/rodonaves", async (req, res) => {
   const cnpj = (req.query.cnpj || "16524954000133").trim();
   const nf = (req.query.nf || "").trim();
-  if (!nf) return res.status(400).json({ ok: false, error: "Falta parâmetro nf" });
+  if (!nf) return res.status(400).json({ ok:false, error:"Falta parâmetro nf" });
 
   let browser = null;
   try {
     const url = "https://rodonaves.com.br/rastreio-de-mercadoria";
+
+    // 🔎 resolve caminho do Chrome
     const executablePath = await resolveChromePath();
 
     browser = await puppeteer.launch({
@@ -71,16 +97,18 @@ app.get("/rodonaves", async (req, res) => {
 
     await page.goto(url, { waitUntil: "domcontentloaded" });
 
-    // Seleciona "Nota fiscal"
+    // Seleciona "Consultar por: Nota fiscal"
     await page.waitForSelector("select.form-select", { visible: true });
     await page.select("select.form-select", "invoiceNumber");
 
-    // Preenche CNPJ/NF e clica
+    // Preenche dados
     await page.type('input[aria-describedby="CPF"]', cnpj, { delay: 15 });
     await page.type('input[aria-describedby="NF"]', nf, { delay: 15 });
+
+    // Clica “RASTREAR”
     await page.click("button.btn-submit.btn-primary");
 
-    // Espera eventos ou "Nenhum pedido encontrado"
+    // Aguarda lista de eventos ou mensagem de “Nenhum pedido...”
     await page.waitForFunction(() => {
       const list = document.querySelectorAll(".product-status-date li");
       const top = document.querySelector(".product-status-top");
@@ -88,6 +116,7 @@ app.get("/rodonaves", async (req, res) => {
       return list.length > 0 || noRes;
     }, { timeout: 45000 }).catch(() => {});
 
+    // Extrai eventos
     const events = await page.$$eval(".product-status-date li", els =>
       els.map(el => ({
         time: el.querySelector(".date")?.textContent?.trim() || "",
@@ -95,6 +124,7 @@ app.get("/rodonaves", async (req, res) => {
       }))
     );
 
+    // Metadados
     const meta = await page.evaluate(() => {
       const get = sel => document.querySelector(sel)?.textContent?.trim() || "";
       return {
@@ -111,10 +141,11 @@ app.get("/rodonaves", async (req, res) => {
     await browser.close();
     browser = null;
 
-    res.json({ ok: events.length > 0, events, meta, url });
+    res.json({ ok: events.length > 0, events, meta, url, usedExecutable: executablePath, searchedDirs: CANDIDATE_DIRS });
   } catch (err) {
     if (browser) try { await browser.close(); } catch {}
-    res.json({ ok: false, error: String(err) });
+    // devolve diagnóstico com diretórios pesquisados
+    res.json({ ok:false, error:String(err), searchedDirs: CANDIDATE_DIRS });
   }
 });
 
